@@ -1,0 +1,22 @@
+{
+  "name": "iotHS-Dispenser",
+  "device_id": "iotHS-40f520287780",
+  "device_stats_interval": 60,
+  "wifi": {
+    "ssid": "testnet",
+    "password": "122333444455555"
+  },
+  "mqtt": {
+    "host": "mqtt.hendranata.com",
+    "port": 10873,
+    "base_topic": "iotHS/",
+    "auth": true,
+    "username": "iotHS",
+    "password": "t7dd5Mj45kBe^Z"
+  },
+  "ota": {
+    "enabled": true
+  },
+  "settings": {
+  }
+}
