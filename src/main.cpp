@@ -308,7 +308,7 @@ timeClient.update();
 
     // publish to temp node
     mqtt.publish(TEMP_TOPIC, 2, true, String("{temp:'"+String(temp)+"', epoch:'"+String(epoch)+"'}").c_str());
-    mqtt.publish(LEVL_TOPIC, 2, true, String("{distance:"+String(distance)+", level: "+String(distance)+" epoch:"+String(epoch)+"}").c_str());
+    mqtt.publish(LEVL_TOPIC, 2, true, String("{distance:"+String(distance)+", level: "+String(distance)+", epoch:"+String(epoch)+"}").c_str());
    
     // dispense liquid
     // dispenseLiquid();
