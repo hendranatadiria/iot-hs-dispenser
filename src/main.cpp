@@ -41,6 +41,7 @@
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+int mosfetPin = 2; // D4
 int obstaclePin = 13; // D7
 int ultraTrigPin = 14; // D5
 int ultraEchoPin = 12; // D6
@@ -51,12 +52,16 @@ unsigned long ultraMillis = 0;
 unsigned long ultraMillisInterval = 60000 * 3; // (60 dtk x 1000 ms) * x -- interval pengiriman level cairan ke broker dalam x menit.
 unsigned long displayMillis = 0;
 unsigned long displayDur = 3000; // 3dtk x 1000 ms
-unsigned long distance;
+unsigned long dispenseMillis = 0;
+unsigned long dispenseDur = 400;
+float distance;
 double ems = 0;
 enum States {low, high, falling};
 States state = low;
 bool actionExecuted = false;
-
+bool wifiConnected = false;
+bool commConnected = false;
+float percentage = 0;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
@@ -67,6 +72,8 @@ Ticker mqttReconnectTimer;
 WiFiEventHandler wifiConnectHandler;
 WiFiEventHandler wiFiDisconnectHandler;
 Ticker wifiReconnectTimer;
+
+String deviceId = "cc-shs-"+String(ESP.getChipId(), HEX);
 
 
 // Device-related routine
@@ -107,6 +114,7 @@ void mqttInit() {
 }
 
 void onWifiConnected(const WiFiEventStationModeGotIP& event) {
+    wifiConnected = true;
     Serial.print("Berhasil terhubung dengan Wifi, IP: ");
     Serial.println(event.ip.toString());
     Serial.println("Menginisialisasi NTP Client...");
@@ -116,6 +124,7 @@ void onWifiConnected(const WiFiEventStationModeGotIP& event) {
 }
 
 void onWifiDisconnected(const WiFiEventStationModeDisconnected& event) {
+    wifiConnected = false;
     Serial.print("Wifi terputus!");
     mqttReconnectTimer.detach();
     wifiReconnectTimer.once(2, wifiInit);
@@ -124,6 +133,7 @@ void onWifiDisconnected(const WiFiEventStationModeDisconnected& event) {
 }
 
 void onMqttConnected(bool sessionPresent) {
+    commConnected = true;
     Serial.println("Terhubung ke MQTT");
     // initDisplay("All systems go!");
     Serial.print("Apakah session di-keep?: "); Serial.println(sessionPresent);
@@ -131,10 +141,12 @@ void onMqttConnected(bool sessionPresent) {
 }
 
 void onMqttDisconnected(AsyncMqttClientDisconnectReason reason) {
+    commConnected = false;
     Serial.println("MQTT terputus!");
 
     if (WiFi.isConnected()) {
         mqttReconnectTimer.once(2, mqttInit);
+        Serial.println("Mencoba koneksi ulang ke MQTT...(inside onMqttDisconnected)");
           // initDisplay("MQTT Reconn...");
     }
 }
@@ -146,8 +158,9 @@ void onMqttPublish(uint16_t packetId) {
 }
 
 // Calculate Distance (cm)
-unsigned long calculateDistanceCM() {
-  unsigned long duration, cm;
+float calculateDistanceCM() {
+  unsigned long duration;
+  float cm;
   digitalWrite(ultraTrigPin, LOW);
     delayMicroseconds(5);
     digitalWrite(ultraTrigPin, HIGH);
@@ -172,13 +185,38 @@ void showTempDisplay(double temp) {
   display.setTextSize(1);
   display.print((char)247);
   display.print(F("C"));
+
+  display.setCursor(1,1);
+  if(wifiConnected) {
+    display.print(F("w   "));
+  } else {
+    display.print(F("wX  "));
+  }
+  if(commConnected) {
+    display.print(F("c   "));
+  } else {
+    display.print(F("cX  "));
+  }
+
+  display.setCursor(92,1);
+  display.print(String(percentage, 2));
+  display.print(F("%"));
+
   display.display();
   displayMillis = millis();
 }
 
+void dispenseLiquid() {
+  Serial.println("Dispensing liquid...");
+  digitalWrite(mosfetPin, HIGH);
+  dispenseMillis = millis();
+}
+
 // Setup Routine
 void setup() {
-    pinMode(obstaclePin, INPUT);
+  pinMode(mosfetPin, OUTPUT);
+  digitalWrite(mosfetPin, LOW);
+  pinMode(obstaclePin, INPUT);
   pinMode(ultraTrigPin, OUTPUT);
   pinMode(ultraEchoPin, INPUT);
   pinMode(LED_BUILTIN, OUTPUT);
@@ -297,21 +335,23 @@ timeClient.update();
     temp = mlx.readObjectTempC();
     delay(20);
     temp = mlx.readObjectTempC();
-    showTempDisplay(temp);
     Serial.println("---------------------------------");
     Serial.print("Suhu objek: "); Serial.print(temp); Serial.print("°C   Suhu sekitar: "); Serial.print(mlx.readAmbientTempC()); Serial.println("°C");
     
     distance = calculateDistanceCM();
-    Serial.print("Jarak cairan dalam tangki:"); Serial.print(distance); Serial.println(" cm.");
+    percentage = (distance<=16?16-distance:0)/16*100;
+    Serial.print("Jarak cairan dalam tangki:"); Serial.print(distance); Serial.print(" cm atau "); Serial.print(percentage); Serial.println("%.");
     
     const long epoch = timeClient.getEpochTime();
+    showTempDisplay(temp);
+
 
     // publish to temp node
-    mqtt.publish(TEMP_TOPIC, 2, true, String("{temp:'"+String(temp)+"', epoch:'"+String(epoch)+"'}").c_str());
-    mqtt.publish(LEVL_TOPIC, 2, true, String("{distance:"+String(distance)+", level: "+String(distance)+", epoch:"+String(epoch)+"}").c_str());
+    mqtt.publish(TEMP_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"temp\": \""+String(temp)+"\", \"epoch\" : \""+String(epoch)+"\"}").c_str());
+    mqtt.publish(LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
    
     // dispense liquid
-    // dispenseLiquid();
+    dispenseLiquid();
 
     digitalWrite(LED_BUILTIN, HIGH);
     Serial.println("---------------------------------");
@@ -328,19 +368,34 @@ timeClient.update();
     Serial.println("(persentase cairan dlm tangki)...");
     Serial.println("");
     distance = calculateDistanceCM();
+    percentage = (distance<=16?16-distance:0)/16*100;
     const long epoch = timeClient.getEpochTime();
-    mqtt.publish(LEVL_TOPIC, 2, true, String("{distance:"+String(distance)+", level: "+String(distance)+" epoch:"+String(epoch)+"}").c_str());
+    mqtt.publish(LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
    
-    Serial.print("Jarak cairan: ");Serial.print(distance); Serial.println("cm");
+    Serial.print("Jarak cairan: ");Serial.print(distance); Serial.print("cm atau "); Serial.print(percentage); Serial.println("%.");
     Serial.println("");
     Serial.println("Cairan akan dihitung kembali");
-    Serial.print("dalam"); Serial.print(ultraMillisInterval/1000); Serial.println(" detik.");
+    Serial.print("dalam "); Serial.print(ultraMillisInterval/1000); Serial.println(" detik.");
     Serial.println("---------------------------------");
+    Serial.print("Heap: ");
+    Serial.println(ESP.getFreeHeap());
     ultraMillis = millis();
   }
 
   if ((millis() - displayMillis) > displayDur) {
     display.clearDisplay();
     display.display();
+  }
+
+  if ((millis() - dispenseMillis) > dispenseDur) {
+    digitalWrite(mosfetPin, LOW);
+  } 
+
+  if(!commConnected){
+    Serial.println("This is happening inside loop when mqtt disconnedted.");
+  }
+
+  if(!wifiConnected){
+    Serial.println("This is happening inside loop when wifi disconnedted.");
   }
 }
