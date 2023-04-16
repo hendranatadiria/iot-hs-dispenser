@@ -34,10 +34,15 @@
 #define TEMP_TOPIC "/cc-shs/temp"
 #define LEVL_TOPIC "/cc-shs/level"
 
+// MQTT Topics
+#define MAINTENANCE_TOPIC "/cc-shs/maintenance"
+
 // Device setup basics
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+
+#define NR 10 // number of repetition of readings for averaging distance (Ultrasonic Sensor)
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
@@ -45,6 +50,7 @@ int mosfetPin = 2; // D4
 int obstaclePin = 13; // D7
 int ultraTrigPin = 14; // D5
 int ultraEchoPin = 12; // D6
+int maintenancePin = 15; // D8
 int irReading = HIGH; // HIGH = tidak ada tangan, LOW = ada tangan
 unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 250;
@@ -53,7 +59,7 @@ unsigned long ultraMillisInterval = 60000 * 3; // (60 dtk x 1000 ms) * x -- inte
 unsigned long displayMillis = 0;
 unsigned long displayDur = 3000; // 3dtk x 1000 ms
 unsigned long dispenseMillis = 0;
-unsigned long dispenseDur = 400;
+unsigned long dispenseDur = 200;
 float distance;
 double ems = 0;
 enum States {low, high, falling};
@@ -62,6 +68,8 @@ bool actionExecuted = false;
 bool wifiConnected = false;
 bool commConnected = false;
 float percentage = 0;
+String msgInit = "";
+bool isMaintenance = false;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
@@ -121,6 +129,10 @@ void onWifiConnected(const WiFiEventStationModeGotIP& event) {
     timeClient.begin();
     // timeClient.setTimeOffset(25200); // GMT+7 karena kita kirim EPOCH, epochnya malah jadi ketambahan 7 jam.
     mqttInit();
+
+    msgInit = "WiFi Connected!";
+    displayMillis = millis();
+
 }
 
 void onWifiDisconnected(const WiFiEventStationModeDisconnected& event) {
@@ -130,6 +142,9 @@ void onWifiDisconnected(const WiFiEventStationModeDisconnected& event) {
     wifiReconnectTimer.once(2, wifiInit);
     // initDisplay("WiFi Reconn...");
 
+    msgInit = "WiFi Disconnected!";
+    displayMillis = millis();
+
 }
 
 void onMqttConnected(bool sessionPresent) {
@@ -138,6 +153,9 @@ void onMqttConnected(bool sessionPresent) {
     // initDisplay("All systems go!");
     Serial.print("Apakah session di-keep?: "); Serial.println(sessionPresent);
     Serial.println("---------- READY TO GO! ----------");
+
+    msgInit = isMaintenance ? "--MAINTENANCE MODE--" : "Ready to Go!";
+    displayMillis = millis();
 }
 
 void onMqttDisconnected(AsyncMqttClientDisconnectReason reason) {
@@ -147,6 +165,8 @@ void onMqttDisconnected(AsyncMqttClientDisconnectReason reason) {
     if (WiFi.isConnected()) {
         mqttReconnectTimer.once(2, mqttInit);
         Serial.println("Mencoba koneksi ulang ke MQTT...(inside onMqttDisconnected)");
+
+        msgInit = "Reconnecting to Server...";
           // initDisplay("MQTT Reconn...");
     }
 }
@@ -159,19 +179,101 @@ void onMqttPublish(uint16_t packetId) {
 
 // Calculate Distance (cm)
 float calculateDistanceCM() {
-  unsigned long duration;
-  float cm;
-  digitalWrite(ultraTrigPin, LOW);
+  // Logic: Get the ambient temperature, then calculate the distance based on the ambient temperature.
+  // Calculation will be done using n=20 (20 times measurement). Then the max and min data will be taken into account as max and min variable.
+  // It will also take into account the second maximum and minimum variable, saved as max2 and min2.
+  // If max-min is less than 1,5cm, then it is considered stable, if not, then calculate the max2-min2. 
+  // If it's stable, then max and min will be removed from calculation and the average of the rest will be returned.
+  // If it's not stable, then -1 will be returned.
+
+  Serial.println("Calculating distance...");
+
+  // Get the ambient temperature
+  double temp = mlx.readAmbientTempC();
+  Serial.print("Ambient temperature: ");
+  Serial.print(temp);
+  Serial.println(" C");
+
+  if (temp == NAN || temp <20 || temp > 40) {
+    Serial.println("Ambient temperature is not valid. Using 28 degrees instead."); // Average temperature in Semarang (customweather.com)
+    temp = 28.0;
+  }
+
+  float soundSpeed = 33130+60.6*temp; // cm/s; source: wikipedia
+  float distance[NR]; // distance array
+
+  for (int i=0; i<NR;i++) {
+    unsigned long duration;
+    digitalWrite(ultraTrigPin, LOW);
     delayMicroseconds(5);
     digitalWrite(ultraTrigPin, HIGH);
-    delayMicroseconds(10);
+    delayMicroseconds(12);
     digitalWrite(ultraTrigPin, LOW);
 
     pinMode(ultraEchoPin, INPUT);
     duration = pulseIn(ultraEchoPin, HIGH);
 
-    cm = (duration/2)/29.1;
-    return cm;
+    distance[i] = (duration/2)*soundSpeed/1000000; // cm, div 10^6 because the duration is in microseconds
+
+    delay(10);
+  }
+
+  // Sort the array
+  for (int i=0; i<NR; i++) {
+    for (int j=i+1; j<NR; j++) {
+      if (distance[i] > distance[j]) {
+        float temp = distance[i];
+        distance[i] = distance[j];
+        distance[j] = temp;
+      }
+    }
+  }
+
+  // Get the max and min value
+  float max = distance[NR-1];
+  float min = distance[0];
+  float max2 = distance[NR-2];
+  float min2 = distance[1];
+
+  // Calculate the average
+  float sum = 0;
+  for (int i=0; i<NR; i++) {
+    sum += distance[i];
+  }
+
+  // Print distances
+  Serial.print("Distances: ");
+  for (int i=0; i<NR; i++) {
+    Serial.print(distance[i]);
+    Serial.print(" ");
+  }
+
+  float cm = sum/NR;
+  Serial.print("Raw average distance: ");
+  Serial.print(cm);
+  Serial.println(" cm");
+  
+  // If max-min is less than 1,5cm, then it is considered stable, if not, then calculate the max2-min2. If it's stable, then max and min will be removed from calculation and the average of the rest will be returned.
+  // If it's not stable, then -1 will be returned.
+
+  if (max-min < 1.5) {
+    Serial.println("Distance is stable.");
+    
+  } else {
+    if (max2-min2 < 1.5) {
+      Serial.println("Distance is stable (using max2 min2).");
+      sum = sum - max - min;
+      cm = sum/(NR-2);
+    } else {
+      Serial.println("Distance is not stable.");
+      cm = -1;
+    }
+  }
+
+  Serial.print("Final Distance: ");
+  Serial.print(cm);
+  Serial.println(" cm");
+  return cm;
 }
 
 // Display temperature on OLED display
@@ -198,9 +300,20 @@ void showTempDisplay(double temp) {
     display.print(F("cX  "));
   }
 
-  display.setCursor(92,1);
+  int geserKiri = (String(percentage, 2).length()+1) * 6;
+  display.setCursor(SCREEN_WIDTH-geserKiri,1);
   display.print(String(percentage, 2));
   display.print(F("%"));
+
+  if(isMaintenance) {
+    display.setCursor(0,SCREEN_HEIGHT-8);
+    display.print(F("MAINTENANCE"));
+  }
+
+  if (percentage < 20) {
+    display.setCursor(isMaintenance? 86 : 43,SCREEN_HEIGHT-8);
+    display.print(F("REFILL!"));
+  }
 
   display.display();
   displayMillis = millis();
@@ -212,8 +325,20 @@ void dispenseLiquid() {
   dispenseMillis = millis();
 }
 
+float calculatePercentage(float currentHeight) {
+  if (currentHeight < 0) return -1;
+  if (currentHeight <=3.88) {
+    return 100;
+  } else if (currentHeight >= 17.3 ) {
+    return 0;
+  } else {
+    return (1 - ((currentHeight - 3.88) / (17.3 - 3.88))) * 100;
+  }
+}
+
 // Setup Routine
 void setup() {
+  pinMode(maintenancePin, INPUT_PULLUP);
   pinMode(mosfetPin, OUTPUT);
   digitalWrite(mosfetPin, LOW);
   pinMode(obstaclePin, INPUT);
@@ -268,6 +393,16 @@ void setup() {
   display.print(ems);
 
   Serial.println("Sensor Suhu siap.\n");
+
+  // Read if the maintenance switch/jumper is on, and set the whole system to maintenance mode if it is.
+  digitalRead(maintenancePin) == LOW ? isMaintenance = false : isMaintenance = true;
+  if (isMaintenance) {
+    Serial.println("Maintenance Mode ON");
+    digitalWrite(LED_BUILTIN, HIGH);
+  } else {
+    Serial.println("Maintenance Mode OFF");
+    digitalWrite(LED_BUILTIN, LOW);
+  }
 
   // All sensors ready, let's connect.
   // WiFi Initialization
@@ -326,7 +461,7 @@ timeClient.update();
   // Berdasar state, eksekusi aksinya.
   if(state == high && !actionExecuted) {
 
-    digitalWrite(LED_BUILTIN, LOW);
+    // digitalWrite(LED_BUILTIN, LOW);
     delay(20);
     double temp = mlx.readObjectTempC();
     delay(50);
@@ -339,21 +474,20 @@ timeClient.update();
     Serial.print("Suhu objek: "); Serial.print(temp); Serial.print("°C   Suhu sekitar: "); Serial.print(mlx.readAmbientTempC()); Serial.println("°C");
     
     distance = calculateDistanceCM();
-    percentage = (distance<=16?16-distance:0)/16*100;
+    percentage = calculatePercentage(distance);
     Serial.print("Jarak cairan dalam tangki:"); Serial.print(distance); Serial.print(" cm atau "); Serial.print(percentage); Serial.println("%.");
     
     const long epoch = timeClient.getEpochTime();
     showTempDisplay(temp);
 
-
     // publish to temp node
-    mqtt.publish(TEMP_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"temp\": \""+String(temp)+"\", \"epoch\" : \""+String(epoch)+"\"}").c_str());
-    mqtt.publish(LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
-   
+    mqtt.publish(isMaintenance ? MAINTENANCE_TOPIC : TEMP_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"temp\": \""+String(temp)+"\", \"epoch\" : \""+String(epoch)+"\"}").c_str());
+    mqtt.publish(isMaintenance ? MAINTENANCE_TOPIC : LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
+
     // dispense liquid
     dispenseLiquid();
 
-    digitalWrite(LED_BUILTIN, HIGH);
+    // digitalWrite(LED_BUILTIN, HIGH);
     Serial.println("---------------------------------");
     Serial.println("Ready.");
     actionExecuted = true;
@@ -368,9 +502,10 @@ timeClient.update();
     Serial.println("(persentase cairan dlm tangki)...");
     Serial.println("");
     distance = calculateDistanceCM();
-    percentage = (distance<=16?16-distance:0)/16*100;
+    percentage = calculatePercentage(distance);
     const long epoch = timeClient.getEpochTime();
-    mqtt.publish(LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
+
+    mqtt.publish(isMaintenance ? MAINTENANCE_TOPIC : LEVL_TOPIC, 0, true, String("{\"deviceId\" : \""+String(deviceId)+"\", \"distance\" :\""+String(distance)+"\", \"level\" : \""+String(percentage)+"\", \"epoch\" :\""+String(epoch)+"\"}").c_str());
    
     Serial.print("Jarak cairan: ");Serial.print(distance); Serial.print("cm atau "); Serial.print(percentage); Serial.println("%.");
     Serial.println("");
@@ -392,10 +527,15 @@ timeClient.update();
   } 
 
   if(!commConnected){
-    Serial.println("This is happening inside loop when mqtt disconnedted.");
+    Serial.println("This is happening inside loop when mqtt disconnected.");
   }
 
   if(!wifiConnected){
     Serial.println("This is happening inside loop when wifi disconnedted.");
+  }
+
+  if (msgInit != "") {
+    initDisplay(msgInit);
+    msgInit = "";
   }
 }
