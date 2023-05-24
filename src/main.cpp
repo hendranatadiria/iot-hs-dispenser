@@ -59,7 +59,7 @@ unsigned long ultraMillisInterval = 60000 * 3; // (60 dtk x 1000 ms) * x -- inte
 unsigned long displayMillis = 0;
 unsigned long displayDur = 3000; // 3dtk x 1000 ms
 unsigned long dispenseMillis = 0;
-unsigned long dispenseDur = 200;
+unsigned long dispenseDur = 250;
 float distance;
 double ems = 0;
 enum States {low, high, falling};
@@ -215,7 +215,7 @@ float calculateDistanceCM() {
 
     distance[i] = (duration/2)*soundSpeed/1000000; // cm, div 10^6 because the duration is in microseconds
 
-    delay(10);
+    delay(5);
   }
 
   // Sort the array
@@ -462,14 +462,15 @@ timeClient.update();
   if(state == high && !actionExecuted) {
 
     // digitalWrite(LED_BUILTIN, LOW);
+    // delay(20);
+    // double temp = mlx.readObjectTempC();
+    // delay(50);
+    // temp = temp + mlx.readObjectTempC();
     delay(20);
     double temp = mlx.readObjectTempC();
-    delay(50);
-    temp = temp + mlx.readObjectTempC();
     delay(20);
     temp = mlx.readObjectTempC();
-    delay(20);
-    temp = mlx.readObjectTempC();
+    
     Serial.println("---------------------------------");
     Serial.print("Suhu objek: "); Serial.print(temp); Serial.print("°C   Suhu sekitar: "); Serial.print(mlx.readAmbientTempC()); Serial.println("°C");
     
