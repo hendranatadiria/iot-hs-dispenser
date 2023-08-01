@@ -215,7 +215,7 @@ float calculateDistanceCM() {
 
     distance[i] = (duration/2)*soundSpeed/1000000; // cm, div 10^6 because the duration is in microseconds
 
-    delay(5);
+    delay(10);
   }
 
   // Sort the array
